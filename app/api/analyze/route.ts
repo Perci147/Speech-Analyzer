@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { AnalysisResult, AnalyzeRequestBody } from "@/lib/types";
 import { getScenario } from "@/lib/scenarios";
+import { classifyGeminiError, describeWait, type GeminiFailure } from "@/lib/gemini-errors";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -17,27 +18,13 @@ const FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-3.5-flash
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
-// Quick "overloaded" replies get one retry on the same model. Timeouts move straight to the next model.
+// Quick "overloaded" or short rate-limit replies get one retry on the same model.
+// Timeouts and daily-quota errors move straight to the next model (see lib/gemini-errors.ts).
 const ATTEMPTS_PER_MODEL = 2;
 // Normal calls take ~15-30s (longer for long recordings). Anything past this is treated as hung.
 const PER_CALL_TIMEOUT_MS = 60_000;
 // Stay under maxDuration so the client always gets a JSON response.
 const TOTAL_BUDGET_MS = 110_000;
-
-/** Fast, explicit overload or rate-limit reply from Google. Worth a short retry. */
-function isOverloaded(err: unknown): boolean {
-  const status = (err as { status?: number })?.status;
-  if (status === 429 || status === 500 || status === 503) return true;
-  const msg = err instanceof Error ? err.message : "";
-  return /\b(429|500|503)\b|high demand|overloaded|unavailable/i.test(msg);
-}
-
-/** Request hung or the connection dropped. Do not wait on this model again. */
-function isTimeoutOrNetwork(err: unknown): boolean {
-  const name = err instanceof Error ? err.name : "";
-  const msg = err instanceof Error ? err.message : "";
-  return name === "AbortError" || /abort|timed? ?out|fetch failed|ECONNRESET|ETIMEDOUT/i.test(msg);
-}
 
 function buildPrompt(scenario: string, customQuestion?: string): string {
   const questionBlock = customQuestion?.trim()
@@ -319,6 +306,9 @@ export async function POST(req: Request) {
   ];
   const models = Array.from(new Set([MODEL_NAME, ...FALLBACK_MODELS]));
   let lastError: unknown = null;
+  // Remember the most informative failure seen across all attempts.
+  let dailyQuota: GeminiFailure | null = null;
+  let rateLimit: GeminiFailure | null = null;
   let sawTransient = false;
 
   const deadline = Date.now() + TOTAL_BUDGET_MS;
@@ -350,25 +340,77 @@ export async function POST(req: Request) {
         lastError = err;
         const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
         const brief = err instanceof Error ? `${err.name}: ${err.message.slice(0, 200)}` : String(err);
-        console.error(`Gemini analysis failed (model=${modelName}, attempt=${attempt + 1}, ${seconds}s): ${brief}`);
-        if (isTimeoutOrNetwork(err)) {
+        const failure = classifyGeminiError(err);
+        console.error(
+          `Gemini analysis failed (model=${modelName}, attempt=${attempt + 1}, ${seconds}s, kind=${failure.kind}): ${brief}`
+        );
+
+        if (failure.kind === "daily-quota") {
+          // Retrying this model cannot help until the quota resets. Try the next model once.
+          if (!dailyQuota || (failure.retryAfterSeconds ?? 0) < (dailyQuota.retryAfterSeconds ?? Infinity)) {
+            dailyQuota = failure;
+          }
+          break;
+        }
+        if (failure.kind === "rate-limit") {
+          rateLimit = failure;
+          const wait = failure.retryAfterSeconds ?? 2;
+          // Only wait if it is short and fits in the time budget; otherwise try the next model.
+          if (attempt < ATTEMPTS_PER_MODEL - 1 && wait <= 10 && deadline - Date.now() > wait * 1000 + 15_000) {
+            await new Promise((r) => setTimeout(r, wait * 1000));
+            continue;
+          }
+          break;
+        }
+        if (failure.kind === "timeout") {
           sawTransient = true;
           break; // hung model: move on to the next one instead of waiting again
         }
-        if (!isOverloaded(err)) break; // e.g. 404 model retired, bad JSON: try the next model
-        sawTransient = true;
-        if (attempt < ATTEMPTS_PER_MODEL - 1) {
-          await new Promise((r) => setTimeout(r, 1500));
+        if (failure.kind === "overloaded") {
+          sawTransient = true;
+          if (attempt < ATTEMPTS_PER_MODEL - 1) {
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          break;
         }
+        break; // 404 model retired, bad JSON, etc.: try the next model
       }
     }
   }
 
-  const transient = sawTransient;
-  const message = transient
-    ? "The AI coach is busy right now. Please wait a moment and try again."
-    : lastError instanceof Error && lastError.message
-      ? lastError.message
-      : "Analysis failed. Please try again.";
-  return NextResponse.json({ error: message }, { status: transient ? 503 : 502 });
+  // A daily quota only matters if nothing else succeeded, so it wins over "busy".
+  if (dailyQuota) {
+    const wait = describeWait(dailyQuota.retryAfterSeconds);
+    return NextResponse.json(
+      {
+        error: `The AI coach has reached its daily usage limit. ${
+          wait ? `It resets in ${wait}.` : "It resets within 24 hours."
+        } Your recording is still here, so you can try again later.`,
+        code: "DAILY_LIMIT",
+        retryAfterSeconds: dailyQuota.retryAfterSeconds ?? null,
+      },
+      { status: 429, headers: dailyQuota.retryAfterSeconds ? { "Retry-After": String(dailyQuota.retryAfterSeconds) } : {} }
+    );
+  }
+  if (rateLimit) {
+    const wait = describeWait(rateLimit.retryAfterSeconds) ?? "about a minute";
+    return NextResponse.json(
+      {
+        error: `Too many analyses are running right now. Please wait ${wait} and try again.`,
+        code: "RATE_LIMIT",
+        retryAfterSeconds: rateLimit.retryAfterSeconds ?? null,
+      },
+      { status: 429, headers: rateLimit.retryAfterSeconds ? { "Retry-After": String(rateLimit.retryAfterSeconds) } : {} }
+    );
+  }
+  if (sawTransient) {
+    return NextResponse.json(
+      { error: "The AI coach is busy right now. Please wait a moment and try again.", code: "BUSY" },
+      { status: 503 }
+    );
+  }
+  const message =
+    lastError instanceof Error && lastError.message ? lastError.message : "Analysis failed. Please try again.";
+  return NextResponse.json({ error: message, code: "FAILED" }, { status: 502 });
 }
