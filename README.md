@@ -50,7 +50,7 @@ Supabase's built-in email sender is meant for testing: it sends only a few email
 ## How it works
 
 - **`/record`** picks one of 10 scenarios defined in `lib/scenarios.ts` (each with delivery benchmarks and 6–7 preloaded questions) plus an optional preloaded or custom question, records with `MediaRecorder` while a Web Audio `AnalyserNode` drives a live canvas visualizer, or accepts an uploaded audio file.
-- The audio Blob is converted to Base64 with `FileReader.readAsDataURL()` and posted as JSON to **`/api/analyze`** (no `FormData`).
+- The audio Blob is converted to Base64 with `FileReader.readAsDataURL()` and posted as JSON to **`/api/analyze`** (no `FormData`). Audio is capped at 3 MB (`lib/audio-limits.ts`) so requests stay under Vercel's 4.5 MB body limit; recordings use 32 kbps Opus, which fits the 10-minute maximum.
 - The API route sends the audio as `inlineData` to `gemini-3.6-flash`, falling back to `gemini-3.5-flash` (override with `GEMINI_MODEL` and `GEMINI_FALLBACK_MODELS`) with `responseMimeType: "application/json"`, then normalizes the response to a fixed schema so the UI never crashes on missing fields.
 - The analysis includes scenario-specific delivery recommendations, and the results page compares pace and length against the scenario's targets.
 - Results are saved with a `uuidv4()` id and ISO timestamp, to the signed-in user's account (Supabase, protected by Row Level Security) or to `localStorage` for guests, and the user is redirected to **`/results/[id]`**.

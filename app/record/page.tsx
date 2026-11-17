@@ -24,6 +24,7 @@ import Waveform from "@/components/Waveform";
 import type { AnalysisResult, SpeechSession } from "@/lib/types";
 import { DEFAULT_SCENARIO, SCENARIOS, formatSecondsRange, getScenario } from "@/lib/scenarios";
 import { saveSession } from "@/lib/sessions";
+import { MAX_AUDIO_BYTES, RECORDING_BITS_PER_SECOND, TOO_LARGE_TIP, formatMegabytes } from "@/lib/audio-limits";
 import { cn, formatTime } from "@/lib/utils";
 import Link from "next/link";
 import { useAuth } from "@/components/AuthProvider";
@@ -39,7 +40,6 @@ type Status = "idle" | "recording" | "recorded" | "analyzing";
 type QuestionMode = "none" | "preset" | "custom";
 
 const MAX_RECORDING_SECONDS = 10 * 60;
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // keep inline base64 well under Gemini's request limit
 
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
@@ -196,15 +196,32 @@ export default function RecordPage() {
         audio: { echoCancellation: true, noiseSuppression: true },
       });
       const mimeType = pickMimeType();
-      const recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+      const recorder = new MediaRecorder(mediaStream, {
+        ...(mimeType ? { mimeType } : {}),
+        // Speech-quality bitrate keeps long recordings under the upload limit.
+        audioBitsPerSecond: RECORDING_BITS_PER_SECOND,
+      });
       chunksRef.current = [];
+      let recordedBytes = 0;
+      let stoppedForSize = false;
 
       recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+        if (!e.data || e.data.size === 0) return;
+        chunksRef.current.push(e.data);
+        recordedBytes += e.data.size;
+        // Safety net in case the browser ignores the requested bitrate.
+        if (recordedBytes > MAX_AUDIO_BYTES * 0.95 && recorder.state === "recording") {
+          stoppedForSize = true;
+          recorder.stop();
+          clearTimer();
+        }
       };
       recorder.onstop = () => {
         const type = recorder.mimeType || mimeType || "audio/webm";
         const blob = new Blob(chunksRef.current, { type });
+        if (stoppedForSize) {
+          setError("Recording stopped automatically because it reached the maximum length. You can analyze what was recorded.");
+        }
         setAudioBlob(blob);
         setAudioUrl(URL.createObjectURL(blob));
         setSourceLabel("Microphone recording");
@@ -270,8 +287,10 @@ export default function RecordPage() {
         e.target.value = "";
         return;
       }
-      if (file.size > MAX_UPLOAD_BYTES) {
-        setError("That file is too large. Please upload an audio file under 20 MB.");
+      if (file.size > MAX_AUDIO_BYTES) {
+        setError(
+          `That file is ${formatMegabytes(file.size)}, and the limit is ${formatMegabytes(MAX_AUDIO_BYTES)}. ${TOO_LARGE_TIP}`
+        );
         e.target.value = "";
         return;
       }
@@ -292,6 +311,14 @@ export default function RecordPage() {
     setErrorCode(null);
     setStatus("analyzing");
 
+    if (audioBlob.size > MAX_AUDIO_BYTES) {
+      setError(
+        `This recording is ${formatMegabytes(audioBlob.size)}, and the limit is ${formatMegabytes(MAX_AUDIO_BYTES)}. ${TOO_LARGE_TIP}`
+      );
+      setStatus("recorded");
+      return;
+    }
+
     try {
       setAnalysisStep("Encoding audio…");
       const base64Audio = await blobToBase64(audioBlob);
@@ -308,6 +335,10 @@ export default function RecordPage() {
         }),
       });
 
+      // Hosting platforms reject oversized requests before our code runs, with a non-JSON body.
+      if (res.status === 413) {
+        throw new Error(`This audio is too large to upload. ${TOO_LARGE_TIP}`);
+      }
       const data = await res.json().catch(() => null);
       if (!res.ok || !data || data.error) {
         setErrorCode(typeof data?.code === "string" ? data.code : null);

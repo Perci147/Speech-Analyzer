@@ -5,6 +5,7 @@ import { getScenario } from "@/lib/scenarios";
 import { classifyGeminiError, describeWait, type GeminiFailure } from "@/lib/gemini-errors";
 import { consumeAnalysis, identifyCaller, refundAnalysis } from "@/lib/usage";
 import { DAILY_LIMIT_USER } from "@/lib/supabase/config";
+import { MAX_AUDIO_BYTES, TOO_LARGE_TIP, base64DecodedBytes, formatMegabytes } from "@/lib/audio-limits";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -290,6 +291,18 @@ export async function POST(req: Request) {
   const commaIdx = audio.indexOf(",");
   const base64Data =
     audio.startsWith("data:") && commaIdx !== -1 ? audio.slice(commaIdx + 1) : audio;
+
+  // Checked before the daily limit so oversized uploads never use up an analysis.
+  const audioBytes = base64DecodedBytes(base64Data);
+  if (audioBytes > MAX_AUDIO_BYTES) {
+    return NextResponse.json(
+      {
+        error: `This audio is ${formatMegabytes(audioBytes)}, and the limit is ${formatMegabytes(MAX_AUDIO_BYTES)}. ${TOO_LARGE_TIP}`,
+        code: "AUDIO_TOO_LARGE",
+      },
+      { status: 413 }
+    );
+  }
 
   // MediaRecorder often reports "audio/webm;codecs=opus"; strip the codec parameter for Gemini.
   const cleanMime = (typeof mimeType === "string" && mimeType.trim() ? mimeType : "audio/webm")
