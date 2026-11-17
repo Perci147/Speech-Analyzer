@@ -8,6 +8,7 @@ import {
   Activity,
   AudioLines,
   CheckCircle2,
+  Compass,
   Clock,
   Ear,
   FileText,
@@ -27,6 +28,7 @@ import {
 import ScoreRing from "@/components/ScoreRing";
 import { deleteSession, getSession } from "@/lib/storage";
 import type { SpeechSession } from "@/lib/types";
+import { formatSecondsRange, getScenario } from "@/lib/scenarios";
 import { cn, formatDate, formatTime, scoreBg, scoreColor } from "@/lib/utils";
 
 const SCORE_LABELS: Array<{ key: keyof SpeechSession["analysis"]["scores"]; label: string; icon: LucideIcon }> = [
@@ -82,6 +84,41 @@ function Metric({ label, value, icon: Icon }: { label: string; value: string; ic
   );
 }
 
+function compareToRange(value: number, [min, max]: [number, number], unitsLow: string, unitsHigh: string) {
+  if (!value) return { label: "Not measured", tone: "bg-slate-100 text-slate-600" };
+  if (value < min) return { label: unitsLow, tone: "bg-amber-100 text-amber-800" };
+  if (value > max) return { label: unitsHigh, tone: "bg-amber-100 text-amber-800" };
+  return { label: "On target", tone: "bg-emerald-100 text-emerald-800" };
+}
+
+function Benchmark({
+  icon: Icon,
+  label,
+  actual,
+  ideal,
+  status,
+}: {
+  icon: LucideIcon;
+  label: string;
+  actual: string;
+  ideal: string;
+  status: { label: string; tone: string };
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+          <Icon className="h-4 w-4 text-slate-400" />
+          {label}
+        </span>
+        <span className={cn("rounded-full px-2.5 py-0.5 text-xs font-medium", status.tone)}>{status.label}</span>
+      </div>
+      <p className="mt-2 text-lg font-semibold text-slate-900">{actual}</p>
+      <p className="text-xs text-slate-500">Ideal for this scenario: {ideal}</p>
+    </div>
+  );
+}
+
 export default function ResultsPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -132,6 +169,13 @@ export default function ResultsPage() {
   const improvements = Array.isArray(analysis.improvements) ? analysis.improvements : [];
   const strengths = Array.isArray(analysis.strengths) ? analysis.strengths : [];
   const fillers = Array.isArray(metrics.fillerWordsDetected) ? metrics.fillerWordsDetected : [];
+  const profile = getScenario(session.scenario);
+  const scenarioDelivery = analysis.scenarioDelivery;
+  const scenarioRecs = Array.isArray(scenarioDelivery?.recommendations) ? scenarioDelivery.recommendations : [];
+  const practiceAgainHref = `/record?${new URLSearchParams({
+    ...(profile ? { scenario: profile.id } : {}),
+    ...(session.customQuestion ? { question: session.customQuestion } : {}),
+  }).toString()}`;
 
   const handleDelete = () => {
     if (!window.confirm("Delete this session? This cannot be undone.")) return;
@@ -147,7 +191,7 @@ export default function ResultsPage() {
         </Link>
         <div className="flex items-center gap-2">
           <Link
-            href="/record"
+            href={practiceAgainHref}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
           >
             <Mic className="h-4 w-4" /> Practice again
@@ -253,6 +297,75 @@ export default function ResultsPage() {
           )}
         </Card>
       </div>
+
+      {/* Scenario-specific delivery */}
+      <Card title={`Delivery coaching: ${session.scenario}`} icon={Compass}>
+        {profile && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Benchmark
+              icon={Gauge}
+              label="Pace"
+              actual={metrics.wpm ? `${metrics.wpm} wpm` : "—"}
+              ideal={`${profile.delivery.idealWpm[0]}–${profile.delivery.idealWpm[1]} wpm`}
+              status={compareToRange(metrics.wpm ?? 0, profile.delivery.idealWpm, "Slower than ideal", "Faster than ideal")}
+            />
+            <Benchmark
+              icon={Clock}
+              label="Length"
+              actual={metrics.durationSeconds ? formatTime(metrics.durationSeconds) : "—"}
+              ideal={formatSecondsRange(profile.delivery.idealSeconds)}
+              status={compareToRange(
+                metrics.durationSeconds ?? 0,
+                profile.delivery.idealSeconds,
+                "Shorter than typical",
+                "Longer than typical"
+              )}
+            />
+          </div>
+        )}
+
+        {scenarioDelivery?.fitSummary && (
+          <p className={cn("text-sm leading-relaxed text-slate-700", profile && "mt-4")}>{scenarioDelivery.fitSummary}</p>
+        )}
+
+        {scenarioRecs.length > 0 ? (
+          <ul className="mt-4 space-y-3">
+            {scenarioRecs.map((rec, i) => (
+              <li key={i} className="rounded-xl border border-slate-200 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">{rec.title}</h3>
+                {rec.recommendation && <p className="mt-1.5 text-sm text-slate-700">{rec.recommendation}</p>}
+                {rec.example && (
+                  <div className="mt-3 rounded-lg bg-blue-50 p-3 text-sm text-slate-700">
+                    <span className="font-medium text-blue-700">Try this: </span>
+                    <span className="whitespace-pre-line">{rec.example}</span>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-4 text-sm text-slate-500">
+            This session was recorded before scenario recommendations were added. Practice again to get them.
+          </p>
+        )}
+
+        {profile && (
+          <dl className="mt-4 grid gap-3 rounded-xl bg-slate-50 p-4 text-sm sm:grid-cols-3">
+            <div>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ideal tone</dt>
+              <dd className="mt-1 text-slate-700">{profile.delivery.tone}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ideal pauses</dt>
+              <dd className="mt-1 text-slate-700">{profile.delivery.pauses}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ideal structure</dt>
+              <dd className="mt-1 text-slate-700">{profile.delivery.structure}</dd>
+            </div>
+          </dl>
+        )}
+      </Card>
 
       {/* Priority improvements */}
       <Card title="Priority improvements" icon={Lightbulb}>

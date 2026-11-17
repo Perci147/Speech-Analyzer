@@ -1,11 +1,17 @@
-export const SCENARIOS = [
-  "Job Interview",
-  "Sales Pitch",
-  "Keynote Presentation",
-  "General Public Speaking",
-] as const;
+// Scenario definitions and preloaded questions live in lib/scenarios.ts.
 
-export type Scenario = (typeof SCENARIOS)[number];
+export interface ScenarioRecommendation {
+  title: string;
+  recommendation: string;
+  /** A concrete phrasing, example line, or practice step. */
+  example: string;
+}
+
+export interface ScenarioDelivery {
+  /** How well the delivery suited this specific scenario. */
+  fitSummary: string;
+  recommendations: ScenarioRecommendation[];
+}
 
 export type ImprovementCategory =
   | "Tone"
@@ -49,6 +55,8 @@ export interface AnalysisResult {
   };
   improvements: Improvement[];
   strengths: string[];
+  /** Scenario-specific delivery coaching. Missing on sessions saved before this feature. */
+  scenarioDelivery?: ScenarioDelivery;
 }
 
 export interface SpeechSession {

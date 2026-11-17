@@ -12,13 +12,22 @@ import {
   RotateCcw,
   Sparkles,
   FileAudio,
+  Check,
+  Clock,
+  Gauge,
+  ListOrdered,
+  MessageSquareQuote,
+  PenLine,
+  Shuffle,
 } from "lucide-react";
 import Waveform from "@/components/Waveform";
-import { SCENARIOS, type AnalysisResult, type SpeechSession } from "@/lib/types";
+import type { AnalysisResult, SpeechSession } from "@/lib/types";
+import { DEFAULT_SCENARIO, SCENARIOS, formatSecondsRange, getScenario } from "@/lib/scenarios";
 import { saveSession } from "@/lib/storage";
 import { cn, formatTime } from "@/lib/utils";
 
 type Status = "idle" | "recording" | "recorded" | "analyzing";
+type QuestionMode = "none" | "preset" | "custom";
 
 const MAX_RECORDING_SECONDS = 10 * 60;
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // keep inline base64 well under Gemini's request limit
@@ -53,8 +62,56 @@ function blobToBase64(blob: Blob): Promise<string> {
 export default function RecordPage() {
   const router = useRouter();
 
-  const [scenario, setScenario] = useState<string>(SCENARIOS[0]);
+  const [scenarioId, setScenarioId] = useState<string>(DEFAULT_SCENARIO.id);
+  const [questionMode, setQuestionMode] = useState<QuestionMode>("none");
+  const [presetQuestion, setPresetQuestion] = useState("");
   const [customQuestion, setCustomQuestion] = useState("");
+
+  const scenarioDef = getScenario(scenarioId) ?? DEFAULT_SCENARIO;
+  const scenario = scenarioDef.name;
+  const targetQuestion =
+    questionMode === "preset" ? presetQuestion : questionMode === "custom" ? customQuestion.trim() : "";
+
+  // Allow links like /record?scenario=job-interview&question=... (used by "Practice again").
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = getScenario(params.get("scenario"));
+    const question = params.get("question")?.trim();
+    if (fromUrl) setScenarioId(fromUrl.id);
+    if (question) {
+      if ((fromUrl ?? DEFAULT_SCENARIO).questions.includes(question)) {
+        setPresetQuestion(question);
+        setQuestionMode("preset");
+      } else {
+        setCustomQuestion(question);
+        setQuestionMode("custom");
+      }
+    }
+  }, []);
+
+  const changeScenario = (id: string) => {
+    setScenarioId(id);
+    // Preloaded questions belong to a scenario, so clear them. Keep a custom question.
+    if (questionMode === "preset") {
+      setQuestionMode("none");
+      setPresetQuestion("");
+    }
+  };
+
+  const choosePreset = (q: string) => {
+    if (questionMode === "preset" && presetQuestion === q) {
+      setQuestionMode("none");
+      setPresetQuestion("");
+      return;
+    }
+    setPresetQuestion(q);
+    setQuestionMode("preset");
+  };
+
+  const surpriseMe = () => {
+    const pool = scenarioDef.questions.filter((q) => q !== presetQuestion);
+    choosePreset(pool[Math.floor(Math.random() * pool.length)]);
+  };
   const [status, setStatus] = useState<Status>("idle");
   const [elapsed, setElapsed] = useState(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -221,7 +278,7 @@ export default function RecordPage() {
           audio: base64Audio,
           mimeType: audioBlob.type || "audio/webm",
           scenario,
-          customQuestion: customQuestion.trim() || undefined,
+          customQuestion: targetQuestion || undefined,
         }),
       });
 
@@ -236,7 +293,7 @@ export default function RecordPage() {
         id: uuidv4(),
         createdAt: new Date().toISOString(),
         scenario,
-        customQuestion: customQuestion.trim() || undefined,
+        customQuestion: targetQuestion || undefined,
         analysis,
       };
       saveSession(session);
@@ -245,60 +302,159 @@ export default function RecordPage() {
       setError(err instanceof Error ? err.message : "Something went wrong during analysis.");
       setStatus("recorded");
     }
-  }, [audioBlob, scenario, customQuestion, router]);
+  }, [audioBlob, scenario, targetQuestion, router]);
 
   const isRecording = status === "recording";
   const isAnalyzing = status === "analyzing";
+  const setupLocked = isRecording || isAnalyzing;
 
   return (
     <div className="space-y-8">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Recording Studio</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Pick a scenario, optionally add the exact question you are preparing for, then record or upload your
-          practice run.
+          Pick a scenario, choose a practice question or write your own, then record or upload your practice run.
         </p>
       </header>
 
       {/* Setup */}
-      <section className="grid gap-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:grid-cols-2">
-        <div className="space-y-2">
-          <label htmlFor="scenario" className="block text-sm font-medium text-slate-700">
-            Speaking scenario
-          </label>
-          <select
-            id="scenario"
-            value={scenario}
-            onChange={(e) => setScenario(e.target.value)}
-            disabled={isRecording || isAnalyzing}
-            className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/20 disabled:bg-slate-50"
-          >
-            {SCENARIOS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-          <p className="text-xs text-slate-500">The coach tailors its feedback to this context.</p>
+      <section className="space-y-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="grid gap-5 md:grid-cols-2">
+          <div className="space-y-2">
+            <label htmlFor="scenario" className="block text-sm font-medium text-slate-700">
+              Speaking scenario
+            </label>
+            <select
+              id="scenario"
+              value={scenarioId}
+              onChange={(e) => changeScenario(e.target.value)}
+              disabled={setupLocked}
+              className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/20 disabled:bg-slate-50"
+            >
+              {SCENARIOS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-sm text-slate-600">{scenarioDef.description}</p>
+          </div>
+
+          <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">What good delivery looks like</p>
+            <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
+              <div className="flex items-start gap-2">
+                <Gauge className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+                <div>
+                  <dt className="text-xs text-slate-500">Pace</dt>
+                  <dd className="font-medium text-slate-900">
+                    {scenarioDef.delivery.idealWpm[0]}–{scenarioDef.delivery.idealWpm[1]} wpm
+                  </dd>
+                </div>
+              </div>
+              <div className="flex items-start gap-2">
+                <Clock className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+                <div>
+                  <dt className="text-xs text-slate-500">Length</dt>
+                  <dd className="font-medium text-slate-900">{formatSecondsRange(scenarioDef.delivery.idealSeconds)}</dd>
+                </div>
+              </div>
+              <div className="col-span-2 flex items-start gap-2">
+                <ListOrdered className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+                <div>
+                  <dt className="text-xs text-slate-500">Structure</dt>
+                  <dd className="text-slate-800">{scenarioDef.delivery.structure}</dd>
+                </div>
+              </div>
+            </dl>
+          </div>
         </div>
 
-        <div className="space-y-2">
-          <label htmlFor="customQuestion" className="block text-sm font-medium text-slate-700">
-            Target Question or Prompt <span className="font-normal text-slate-400">(Optional)</span>
-          </label>
-          <textarea
-            id="customQuestion"
-            value={customQuestion}
-            onChange={(e) => setCustomQuestion(e.target.value)}
-            disabled={isRecording || isAnalyzing}
-            rows={3}
-            maxLength={2000}
-            placeholder='e.g. "Tell me about a time you handled a difficult stakeholder."'
-            className="block w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/20 disabled:bg-slate-50"
-          />
-          <p className="text-xs text-slate-500">
-            If provided, the AI also grades how well your answer addressed this prompt.
-          </p>
+        <div className="border-t border-slate-200 pt-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium text-slate-700">
+                Practice question <span className="font-normal text-slate-400">(Optional)</span>
+              </p>
+              <p className="text-xs text-slate-500">
+                If you pick one, the coach also grades how well your answer addressed it. Click a selected question
+                again to clear it.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={surpriseMe}
+              disabled={setupLocked}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              <Shuffle className="h-3.5 w-3.5" />
+              Surprise me
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Practice question">
+            {scenarioDef.questions.map((q) => {
+              const selected = questionMode === "preset" && presetQuestion === q;
+              return (
+                <button
+                  key={q}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => choosePreset(q)}
+                  disabled={setupLocked}
+                  className={cn(
+                    "flex items-start gap-3 rounded-lg border px-3 py-2.5 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60",
+                    selected
+                      ? "border-blue-600 bg-blue-50 text-slate-900 ring-1 ring-blue-600"
+                      : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border",
+                      selected ? "border-blue-600 bg-blue-600 text-white" : "border-slate-300"
+                    )}
+                  >
+                    {selected && <Check className="h-3 w-3" />}
+                  </span>
+                  {q}
+                </button>
+              );
+            })}
+
+            <button
+              type="button"
+              role="radio"
+              aria-checked={questionMode === "custom"}
+              onClick={() => setQuestionMode(questionMode === "custom" ? "none" : "custom")}
+              disabled={setupLocked}
+              className={cn(
+                "flex items-start gap-3 rounded-lg border border-dashed px-3 py-2.5 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60",
+                questionMode === "custom"
+                  ? "border-blue-600 bg-blue-50 text-slate-900"
+                  : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+              )}
+            >
+              <PenLine className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+              Write my own question
+            </button>
+          </div>
+
+          {questionMode === "custom" && (
+            <textarea
+              id="customQuestion"
+              aria-label="Your own question or prompt"
+              value={customQuestion}
+              onChange={(e) => setCustomQuestion(e.target.value)}
+              disabled={setupLocked}
+              rows={3}
+              maxLength={2000}
+              autoFocus
+              placeholder='e.g. "Tell me about a time you handled a difficult stakeholder."'
+              className="mt-3 block w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/20 disabled:bg-slate-50"
+            />
+          )}
         </div>
       </section>
 
@@ -317,6 +473,14 @@ export default function RecordPage() {
             </span>
           </div>
           <span className="font-mono text-2xl font-semibold tabular-nums text-slate-900">{formatTime(elapsed)}</span>
+        </div>
+
+        <div className="mt-4 flex items-start gap-2 rounded-lg bg-slate-50 px-3 py-2.5 text-sm">
+          <MessageSquareQuote className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+          <p className="text-slate-700">
+            <span className="font-medium text-slate-900">{scenario}: </span>
+            {targetQuestion || <span className="text-slate-500">Free practice, no specific question.</span>}
+          </p>
         </div>
 
         <div className="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 px-4">

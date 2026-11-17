@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { AnalysisResult, AnalyzeRequestBody } from "@/lib/types";
+import { getScenario } from "@/lib/scenarios";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -18,8 +19,8 @@ const FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-3.5-flash
   .filter(Boolean);
 // Quick "overloaded" replies get one retry on the same model. Timeouts move straight to the next model.
 const ATTEMPTS_PER_MODEL = 2;
-// Normal calls take ~15s. Anything past this is treated as a hung request.
-const PER_CALL_TIMEOUT_MS = 45_000;
+// Normal calls take ~15-30s (longer for long recordings). Anything past this is treated as hung.
+const PER_CALL_TIMEOUT_MS = 60_000;
 // Stay under maxDuration so the client always gets a JSON response.
 const TOTAL_BUDGET_MS = 110_000;
 
@@ -53,12 +54,30 @@ In addition to vocal delivery, evaluate HOW EFFECTIVELY they answered this promp
 No specific prompt was provided. Evaluate "structureAndContent" on general organization, clarity of message, and whether the speech had a discernible beginning, middle, and end. Set "detailedAnalysis.questionAlignment" to a short note that no target prompt was supplied.
 `;
 
+  const profile = getScenario(scenario);
+  const deliveryBlock = profile
+    ? `
+### DELIVERY BENCHMARKS FOR THIS SCENARIO (${profile.name})
+- Ideal pace: ${profile.delivery.idealWpm[0]}-${profile.delivery.idealWpm[1]} words per minute
+- Typical length: ${profile.delivery.idealSeconds[0]}-${profile.delivery.idealSeconds[1]} seconds
+- Tone: ${profile.delivery.tone}
+- Pacing: ${profile.delivery.pacing}
+- Pauses: ${profile.delivery.pauses}
+- Structure: ${profile.delivery.structure}
+Judge tone, cadence, pauses, and structure against what works for THIS scenario, not a generic standard. For example, a slower, calmer delivery is a strength in a difficult conversation but may be a weakness in a sales pitch.
+`
+    : `
+### DELIVERY BENCHMARKS
+No predefined benchmarks exist for this scenario. Infer what effective delivery looks like for "${scenario}" and judge against that.
+`;
+
   return `
 You are an expert, empathetic Speech Coach and Speech-Language Pathology (SLP) specialist. You are listening to an audio recording of a person practicing public speaking. Your job is to give a thorough, honest, supportive, and highly actionable evaluation.
 
 ### CONTEXT
 Speaking scenario: ${scenario}
 ${questionBlock}
+${deliveryBlock}
 
 ### FAIRNESS RULE (MANDATORY)
 Do NOT penalize regional accents, non-native dialects, or non-standard pronunciations that are simply features of the speaker's accent or dialect. Accents are not errors. Judge clarity by whether the speaker is intelligible and whether the message lands, not by whether they sound like a "standard" speaker. Only comment on articulation when it is a genuine, discrete pattern (see below), and do so with warmth.
@@ -70,6 +89,7 @@ Do NOT penalize regional accents, non-native dialects, or non-standard pronuncia
 4. FILLER WORDS: Give an exact count and identify each filler used ("um", "uh", "er", "like", "you know", "so", "basically", "actually", "right", "kind of", "sort of", "I mean", etc.). Note any triggers (e.g. fillers cluster at transitions).
 5. SPEECH IMPEDIMENTS & ARTICULATION PATTERNS: Constructively and empathetically identify any noticeable disfluencies such as stuttering, blocks, or repetitions; lisps; mumbling; slurring; cluttering (overly fast, collapsed speech); dropped word endings; or consonant-cluster difficulties. For each pattern found, give a targeted, supportive vocal exercise or recommendation (e.g. easy onset, light contact, pacing boards, over-articulation drills, tongue-twister progressions, diaphragmatic breathing). If none are detected, say "No significant impediments detected" and give general articulation tips.
 6. QUESTION ALIGNMENT: As described above.
+7. SCENARIO DELIVERY: Compare the speaker's actual pace, length, tone, pauses, and structure to the benchmarks above. In "scenarioDelivery.fitSummary", say in 2 to 4 sentences how well their delivery suits this scenario (${scenario}), citing their measured pace and length. Then give 3 to 5 "scenarioDelivery.recommendations" that are specific to this scenario (not generic speaking tips, and not repeats of "improvements"). Each one needs a short "title", a "recommendation" explaining what to change and why it matters in this setting, and an "example" with a concrete line they could say, a rewrite of something they actually said, or a precise practice step.
 
 ### TRANSCRIPT
 Produce a full, verbatim transcript. Keep every filler word exactly as spoken. Mark noticeable pauses inline as [pause] and long ones as [long pause]. Mark audible disfluencies such as repetitions or blocks faithfully (e.g. "I-I-I think", "[block] the"). Do not clean it up.
@@ -119,7 +139,17 @@ Return ONLY a single JSON object matching EXACTLY this schema. No markdown, no c
       "exercise": "Step-by-step actionable drill or vocal recommendation to fix it..."
     }
   ],
-  "strengths": ["Strength 1", "Strength 2"]
+  "strengths": ["Strength 1", "Strength 2"],
+  "scenarioDelivery": {
+    "fitSummary": "How well this delivery suits the scenario, citing measured pace and length...",
+    "recommendations": [
+      {
+        "title": "Scenario-specific recommendation title",
+        "recommendation": "What to change and why it matters in this scenario...",
+        "example": "A concrete line to say, a rewrite of their own words, or a precise practice step..."
+      }
+    ]
+  }
 }
 
 If the audio is silent, inaudible, or contains no speech, still return the full schema with low scores, an empty transcript, and an explanation in the detailedAnalysis fields.
@@ -206,6 +236,19 @@ function normalize(raw: Loose): AnalysisResult {
     },
     improvements,
     strengths: strArray(raw?.strengths),
+    scenarioDelivery: {
+      fitSummary: str(raw?.scenarioDelivery?.fitSummary),
+      recommendations: Array.isArray(raw?.scenarioDelivery?.recommendations)
+        ? raw.scenarioDelivery.recommendations
+            .filter((r: any) => r && typeof r === "object")
+            .map((r: any) => ({
+              title: str(r.title, "Recommendation"),
+              recommendation: str(r.recommendation),
+              example: str(r.example),
+            }))
+            .filter((r: { recommendation: string }) => r.recommendation.trim().length > 0)
+        : [],
+    },
   };
 }
 

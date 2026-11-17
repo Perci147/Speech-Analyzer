@@ -28,9 +28,10 @@ Built with Next.js 14 (App Router), TypeScript, Tailwind CSS, Lucide icons, and 
 
 ## How it works
 
-- **`/record`** picks a scenario and optional target question, records with `MediaRecorder` while a Web Audio `AnalyserNode` drives a live canvas visualizer, or accepts an uploaded audio file.
+- **`/record`** picks one of 10 scenarios defined in `lib/scenarios.ts` (each with delivery benchmarks and 6–7 preloaded questions) plus an optional preloaded or custom question, records with `MediaRecorder` while a Web Audio `AnalyserNode` drives a live canvas visualizer, or accepts an uploaded audio file.
 - The audio Blob is converted to Base64 with `FileReader.readAsDataURL()` and posted as JSON to **`/api/analyze`** (no `FormData`).
 - The API route sends the audio as `inlineData` to `gemini-3.6-flash`, falling back to `gemini-3.5-flash` (override with `GEMINI_MODEL` and `GEMINI_FALLBACK_MODELS`) with `responseMimeType: "application/json"`, then normalizes the response to a fixed schema so the UI never crashes on missing fields.
+- The analysis includes scenario-specific delivery recommendations, and the results page compares pace and length against the scenario's targets.
 - Results are saved to `localStorage` with a `uuidv4()` id and ISO timestamp, and the user is redirected to **`/results/[id]`**.
 - **`/`** (Dashboard) shows aggregate stats and session history from `localStorage`.
 
