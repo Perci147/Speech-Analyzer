@@ -26,7 +26,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import ScoreRing from "@/components/ScoreRing";
-import { deleteSession, getSession } from "@/lib/storage";
+import { deleteSession, getSession } from "@/lib/sessions";
+import { useAuth } from "@/components/AuthProvider";
 import type { SpeechSession } from "@/lib/types";
 import { formatSecondsRange, getScenario } from "@/lib/scenarios";
 import { cn, formatDate, formatTime, scoreBg, scoreColor } from "@/lib/utils";
@@ -122,12 +123,29 @@ function Benchmark({
 export default function ResultsPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const { loading: authLoading, user } = useAuth();
   const [session, setSession] = useState<SpeechSession | null | undefined>(undefined);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (authLoading) return; // wait until we know whether to look in the account or on this device
     const id = Array.isArray(params?.id) ? params.id[0] : params?.id;
-    setSession(id ? getSession(id) ?? null : null);
-  }, [params]);
+    if (!id) {
+      setSession(null);
+      return;
+    }
+    let cancelled = false;
+    getSession(id)
+      .then((s) => !cancelled && setSession(s ?? null))
+      .catch((err: Error) => {
+        if (cancelled) return;
+        setLoadError(err.message);
+        setSession(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [params, authLoading, user?.id]);
 
   if (session === undefined) {
     return (
@@ -142,7 +160,10 @@ export default function ResultsPage() {
       <div className="mx-auto max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
         <h1 className="text-lg font-semibold text-slate-900">Session not found</h1>
         <p className="mt-2 text-sm text-slate-500">
-          This result may have been deleted, or it was saved in a different browser.
+          {loadError ??
+            (user
+              ? "This result may have been deleted, or it belongs to a different account."
+              : "This result may have been deleted, or it was saved in a different browser. If you have an account, sign in to see your saved sessions.")}
         </p>
         <div className="mt-6 flex justify-center gap-3">
           <Link
@@ -177,10 +198,14 @@ export default function ResultsPage() {
     ...(session.customQuestion ? { question: session.customQuestion } : {}),
   }).toString()}`;
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!window.confirm("Delete this session? This cannot be undone.")) return;
-    deleteSession(session.id);
-    router.push("/");
+    try {
+      await deleteSession(session.id);
+      router.push("/");
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Could not delete this session.");
+    }
   };
 
   return (

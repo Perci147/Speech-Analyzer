@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   ArrowRight,
   AudioLines,
   ChevronRight,
+  CloudUpload,
   Gauge,
   Mic,
   Sparkles,
@@ -15,7 +16,8 @@ import {
   Trophy,
 } from "lucide-react";
 import ScoreRing from "@/components/ScoreRing";
-import { clearSessions, deleteSession, getSessions } from "@/lib/storage";
+import { clearSessions, deleteSession, deviceSessionCount, importDeviceSessions, listSessions } from "@/lib/sessions";
+import { useAuth } from "@/components/AuthProvider";
 import type { SpeechSession } from "@/lib/types";
 import { cn, formatDate, formatTime, scoreBg, scoreColor } from "@/lib/utils";
 
@@ -25,11 +27,44 @@ function average(nums: number[]): number {
 }
 
 export default function DashboardPage() {
+  const { configured, user, loading: authLoading } = useAuth();
   const [sessions, setSessions] = useState<SpeechSession[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [deviceCount, setDeviceCount] = useState(0);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    setSessions(getSessions());
+  const reload = useCallback(async () => {
+    setLoadError(null);
+    try {
+      setSessions(await listSessions());
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load your sessions.");
+      setSessions([]);
+    }
+    setDeviceCount(deviceSessionCount());
   }, []);
+
+  // Reload whenever the user signs in or out: the list comes from the account or from this device.
+  useEffect(() => {
+    if (authLoading) return;
+    setSessions(null);
+    reload();
+  }, [authLoading, user?.id, reload]);
+
+  const handleImport = async () => {
+    setImporting(true);
+    setImportMessage(null);
+    try {
+      const n = await importDeviceSessions();
+      setImportMessage(`Saved ${n} session${n === 1 ? "" : "s"} to your account.`);
+      await reload();
+    } catch (err) {
+      setImportMessage(err instanceof Error ? err.message : "Could not save sessions to your account.");
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const stats = useMemo(() => {
     if (!sessions || sessions.length === 0) return null;
@@ -48,16 +83,25 @@ export default function DashboardPage() {
     };
   }, [sessions]);
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (!window.confirm("Delete this session?")) return;
-    deleteSession(id);
-    setSessions(getSessions());
+    try {
+      await deleteSession(id);
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Could not delete this session.");
+    }
   };
 
-  const handleClearAll = () => {
-    if (!window.confirm("Delete all practice sessions? This cannot be undone.")) return;
-    clearSessions();
-    setSessions([]);
+  const handleClearAll = async () => {
+    const where = user ? "from your account" : "from this device";
+    if (!window.confirm(`Delete all practice sessions ${where}? This cannot be undone.`)) return;
+    try {
+      await clearSessions();
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Could not clear your sessions.");
+    }
   };
 
   return (
@@ -74,6 +118,51 @@ export default function DashboardPage() {
           <Mic className="h-4 w-4" /> Practice Now
         </Link>
       </header>
+
+      {user && deviceCount > 0 && (
+        <section className="flex flex-col gap-3 rounded-2xl border border-blue-200 bg-blue-50 p-5 sm:flex-row sm:items-center">
+          <CloudUpload className="h-6 w-6 shrink-0 text-blue-600" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-slate-900">
+              {deviceCount} practice session{deviceCount === 1 ? " is" : "s are"} saved only on this device
+            </p>
+            <p className="text-sm text-slate-600">Save them to your account to keep them on every device.</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleImport}
+            disabled={importing}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
+          >
+            {importing ? "Saving…" : "Save to my account"}
+          </button>
+        </section>
+      )}
+
+      {importMessage && (
+        <p className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">{importMessage}</p>
+      )}
+
+      {loadError && (
+        <p className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{loadError}</p>
+      )}
+
+      {configured && !authLoading && !user && sessions !== null && sessions.length > 0 && (
+        <section className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center">
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-slate-900">Your history is only saved in this browser</p>
+            <p className="text-sm text-slate-600">
+              Create a free account to keep your sessions safe and see them on any device.
+            </p>
+          </div>
+          <Link
+            href="/signup"
+            className="rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+          >
+            Create free account
+          </Link>
+        </section>
+      )}
 
       {sessions === null ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

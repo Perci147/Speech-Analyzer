@@ -3,6 +3,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { AnalysisResult, AnalyzeRequestBody } from "@/lib/types";
 import { getScenario } from "@/lib/scenarios";
 import { classifyGeminiError, describeWait, type GeminiFailure } from "@/lib/gemini-errors";
+import { consumeAnalysis, identifyCaller, refundAnalysis } from "@/lib/usage";
+import { DAILY_LIMIT_USER } from "@/lib/supabase/config";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -299,9 +301,39 @@ export async function POST(req: Request) {
   const safeQuestion =
     typeof customQuestion === "string" ? customQuestion.trim().slice(0, 2000) : undefined;
 
+  // Daily limits (only when Supabase is configured): guests per IP, signed-in users per account.
+  const caller = await identifyCaller(req);
+  const quota = await consumeAnalysis(caller);
+  if (!quota.allowed) {
+    return NextResponse.json(
+      caller.isGuest
+        ? {
+            error: `You've used all ${quota.limit} free guest analyses for today. Create a free account to get ${DAILY_LIMIT_USER} a day, or come back tomorrow. Your recording is still here.`,
+            code: "GUEST_LIMIT",
+          }
+        : {
+            error: `You've used all ${quota.limit} analyses for today. Your limit resets at midnight UTC. Your recording is still here.`,
+            code: "USER_LIMIT",
+          },
+      { status: 429 }
+    );
+  }
+
+  const response = await analyzeWithGemini(apiKey, buildPrompt(safeScenario, safeQuestion), base64Data, cleanMime);
+  // Don't charge the user's daily count for analyses that failed.
+  if (quota.counted && response.status !== 200) await refundAnalysis(caller);
+  return response;
+}
+
+async function analyzeWithGemini(
+  apiKey: string,
+  prompt: string,
+  base64Data: string,
+  cleanMime: string
+): Promise<NextResponse> {
   const genAI = new GoogleGenerativeAI(apiKey);
   const parts = [
-    { text: buildPrompt(safeScenario, safeQuestion) },
+    { text: prompt },
     { inlineData: { data: base64Data, mimeType: cleanMime } },
   ];
   const models = Array.from(new Set([MODEL_NAME, ...FALLBACK_MODELS]));

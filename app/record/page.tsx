@@ -23,8 +23,17 @@ import {
 import Waveform from "@/components/Waveform";
 import type { AnalysisResult, SpeechSession } from "@/lib/types";
 import { DEFAULT_SCENARIO, SCENARIOS, formatSecondsRange, getScenario } from "@/lib/scenarios";
-import { saveSession } from "@/lib/storage";
+import { saveSession } from "@/lib/sessions";
 import { cn, formatTime } from "@/lib/utils";
+import Link from "next/link";
+import { useAuth } from "@/components/AuthProvider";
+
+interface UsageInfo {
+  enabled: boolean;
+  isGuest: boolean;
+  used: number;
+  limit: number;
+}
 
 type Status = "idle" | "recording" | "recorded" | "analyzing";
 type QuestionMode = "none" | "preset" | "custom";
@@ -120,6 +129,22 @@ export default function RecordPage() {
   const [sourceLabel, setSourceLabel] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [analysisStep, setAnalysisStep] = useState("");
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [usage, setUsage] = useState<UsageInfo | null>(null);
+  const auth = useAuth();
+
+  // Show "N of M analyses left today" (only when daily limits are configured on the server).
+  const refreshUsage = useCallback(() => {
+    fetch("/api/usage", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((u: UsageInfo | null) => setUsage(u))
+      .catch(() => setUsage(null));
+  }, []);
+
+  // Re-check when the user signs in or out, since guests and accounts have different limits.
+  useEffect(() => {
+    if (!auth.loading) refreshUsage();
+  }, [auth.loading, auth.user?.id, refreshUsage]);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -264,6 +289,7 @@ export default function RecordPage() {
   const analyze = useCallback(async () => {
     if (!audioBlob) return;
     setError(null);
+    setErrorCode(null);
     setStatus("analyzing");
 
     try {
@@ -284,6 +310,8 @@ export default function RecordPage() {
 
       const data = await res.json().catch(() => null);
       if (!res.ok || !data || data.error) {
+        setErrorCode(typeof data?.code === "string" ? data.code : null);
+        refreshUsage();
         throw new Error(data?.error || `Analysis failed (${res.status}).`);
       }
 
@@ -296,13 +324,14 @@ export default function RecordPage() {
         customQuestion: targetQuestion || undefined,
         analysis,
       };
-      saveSession(session);
+      setAnalysisStep("Saving your session…");
+      await saveSession(session);
       router.push(`/results/${session.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong during analysis.");
       setStatus("recorded");
     }
-  }, [audioBlob, scenario, targetQuestion, router]);
+  }, [audioBlob, scenario, targetQuestion, router, refreshUsage]);
 
   const isRecording = status === "recording";
   const isAnalyzing = status === "analyzing";
@@ -500,8 +529,45 @@ export default function RecordPage() {
         {error && (
           <div className="mt-5 flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>{error}</p>
+            <div>
+              <p>{error}</p>
+              {errorCode === "GUEST_LIMIT" && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Link
+                    href="/signup"
+                    className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                  >
+                    Create a free account
+                  </Link>
+                  <Link
+                    href="/login?next=/record"
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Sign in
+                  </Link>
+                </div>
+              )}
+            </div>
           </div>
+        )}
+
+        {usage?.enabled && !isAnalyzing && (
+          <p className="mt-5 text-center text-xs text-slate-500">
+            {usage.isGuest ? "Guest practice: " : ""}
+            <span className="font-medium text-slate-700">
+              {Math.max(0, usage.limit - usage.used)} of {usage.limit}
+            </span>{" "}
+            {usage.isGuest ? "free analyses" : "analyses"} left today.
+            {usage.isGuest && auth.configured && (
+              <>
+                {" "}
+                <Link href="/signup" className="font-medium text-blue-600 hover:text-blue-700">
+                  Sign up free
+                </Link>{" "}
+                to save your history and get more.
+              </>
+            )}
+          </p>
         )}
 
         {isAnalyzing ? (
