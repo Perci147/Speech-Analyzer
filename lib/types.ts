@@ -1,27 +1,67 @@
-export type SpeechCategory = 'pace' | 'confidence' | 'fluency' | 'clarity' | 'structure';
+export const SCENARIOS = [
+  "Job Interview",
+  "Sales Pitch",
+  "Keynote Presentation",
+  "General Public Speaking",
+] as const;
 
-export interface CoachingPriority {
+export type Scenario = (typeof SCENARIOS)[number];
+
+export type ImprovementCategory =
+  | "Tone"
+  | "Cadence"
+  | "Pauses"
+  | "Fillers"
+  | "Articulation"
+  | "Content";
+
+export interface Improvement {
   title: string;
+  category: ImprovementCategory | string;
   context: string;
   exercise: string;
 }
 
-export interface SpeechAnalysis {
-  id: string;
-  date: string;
-  scenario: string;
+export interface AnalysisResult {
   overallScore: number;
   rating: string;
-  scores: Record<SpeechCategory, number>;
+  transcript: string;
+  scores: {
+    tone: number;
+    cadence: number;
+    pauses: number;
+    clarityAndArticulation: number;
+    structureAndContent: number;
+  };
   metrics: {
     durationSeconds: number;
-    wordCount: number;
-    wordsPerMinute: number;
+    wpm: number;
     fillerWordCount: number;
-    fillerRate: number;
-    longestPause: number;
+    fillerWordsDetected: string[];
   };
+  detailedAnalysis: {
+    tone: string;
+    cadence: string;
+    pauses: string;
+    fillers: string;
+    speechImpedimentsAndArticulation: string;
+    questionAlignment?: string;
+  };
+  improvements: Improvement[];
   strengths: string[];
-  improvements: CoachingPriority[];
-  transcript: string;
+}
+
+export interface SpeechSession {
+  id: string;
+  createdAt: string; // ISO timestamp
+  scenario: string;
+  customQuestion?: string;
+  analysis: AnalysisResult;
+}
+
+export interface AnalyzeRequestBody {
+  audio: string; // base64 (with or without a data: prefix)
+  mimeType: string;
+  scenario: string;
+  customQuestion?: string;
 }
